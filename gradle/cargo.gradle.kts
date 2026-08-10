@@ -30,10 +30,7 @@ fun registerCargoNdkBuildTask(taskName: String, buildMode: String) =
                 return@doLast
             }
 
-            val targets = when (buildMode) {
-                "release" -> listOf("arm64-v8a")
-                else -> listOf("arm64-v8a", "x86_64")
-            }
+            val targets = listOf("arm64-v8a")
 
             targets.forEach { abi ->
                 val cargoTarget = when (abi) {
