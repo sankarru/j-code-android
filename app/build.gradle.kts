@@ -55,6 +55,12 @@ android {
         manifestPlaceholders["appIconRound"] = "@mipmap/ic_launcher_round"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Device-verified targets are arm64 (AYN Odin2); drop the other ABIs so dependency
+        // jniLibs (graphics path, datastore, etc.) don't bloat the APK.
+        ndk {
+            abiFilters.add("arm64-v8a")
+        }
     }
 
     buildTypes {
