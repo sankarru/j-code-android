@@ -1,0 +1,183 @@
+name: GraalVM AOT Build + Release APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Build variant'
+        type: choice
+        options: [release, beta]
+        default: release
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup GraalVM JDK 21
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm'
+          cache: gradle
+
+      - name: Verify GraalVM
+        run: |
+          java -version
+          native-image --version
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components
+        run: |
+          sdkmanager \
+            "ndk;27.2.12479018" \
+            "platforms;android-36" \
+            "build-tools;34.0.0"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode keystore
+        if: ${{ github.event.inputs.variant == 'release' || github.event_name == 'push' }}
+        env:
+          JCODE_KEYSTORE_BASE64: ${{ secrets.JCODE_KEYSTORE_BASE64 }}
+          JCODE_KEYSTORE_PASSWORD: ${{ secrets.JCODE_KEYSTORE_PASSWORD }}
+          JCODE_KEY_ALIAS: ${{ secrets.JCODE_KEY_ALIAS }}
+          JCODE_KEY_PASSWORD: ${{ secrets.JCODE_KEY_PASSWORD }}
+        run: |
+          mkdir -p "$HOME/.jcode"
+          if [ -n "$JCODE_KEYSTORE_BASE64" ]; then
+            echo "$JCODE_KEYSTORE_BASE64" | base64 -d > "$HOME/.jcode/jcode-release.jks"
+            echo "$JCODE_KEYSTORE_PASSWORD" > "$HOME/.jcode/jcode-release.password.txt"
+            chmod 600 "$HOME/.jcode/jcode-release.password.txt"
+            echo "Keystore decoded"
+          else
+            echo "No keystore secret — will build unsigned"
+          fi
+
+      - name: GraalVM tracing pass (capture reflection/proxy/JNI metadata)
+        run: |
+          mkdir -p /tmp/graal-tracing
+
+          ./gradlew help \
+            -Dorg.gradle.jvmargs="-Xmx4g -agentlib:native-image-agent=config-output-dir=/tmp/graal-tracing,config-merge-dir=/tmp/graal-tracing" \
+            --console=plain --no-daemon || true
+
+          echo "=== Tracing output ==="
+          ls -la /tmp/graal-tracing/ || echo "No tracing output"
+
+      - name: Generate AOT reflection config
+        run: |
+          mkdir -p app/src/main/resources/META-INF/native-image/dev.jcode
+
+          for f in reflect-config.json proxy-config.json resource-config.json \
+                   jni-config.json serialization-config.json; do
+            if [ -f "/tmp/graal-tracing/$f" ]; then
+              cp "/tmp/graal-tracing/$f" \
+                app/src/main/resources/META-INF/native-image/dev.jcode/
+              echo "Copied $f"
+            fi
+          done
+
+          if [ -f /tmp/graal-tracing/reflect-config.json ]; then
+            echo "=== Reflection entries ==="
+            python3 -m json.tool /tmp/graal-tracing/reflect-config.json 2>/dev/null | head -30 || true
+          fi
+
+      - name: Build Rust FFI libs
+        run: |
+          ./gradlew \
+            :native:ripgrep-ffi:cargoBuildReleaseJniLibs \
+            :native:wasmtime-ffi:cargoBuildReleaseJniLibs \
+            --console=plain --no-daemon
+
+      - name: Build release APK
+        run: |
+          VARIANT="${{ github.event.inputs.variant || 'release' }}"
+          VERSION_NAME="$(sed -n 's/^val jcodeVersion = "\([^"]*\)".*/\1/p' app/build.gradle.kts)"
+          GRADLE_ARGS=(:app:assembleRelease "-PjcodeVersionName=$VERSION_NAME")
+
+          if [ "$VARIANT" = "beta" ]; then
+            GRADLE_ARGS+=("-PjcodeIdSuffix=.beta")
+          fi
+
+          ./gradlew "${GRADLE_ARGS[@]}" \
+            --console=plain --no-daemon \
+            -Dkotlin.daemon.jvmargs=-Xmx2g
+
+      - name: Verify APK
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK found"
+            exit 1
+          fi
+          echo "APK: $APK"
+          ls -lh "$APK"
+          unzip -l "$APK" | grep -E "AndroidManifest|resources\.arsc|\.dex|\.so" | head -10
+
+      - name: Sign APK
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)
+          VERSION_NAME="$(sed -n 's/^val jcodeVersion = "\([^"]*\)".*/\1/p' app/build.gradle.kts)"
+          CODE="$(echo "$VERSION_NAME" | awk -F. '{ c = $1*10000 + $2*100 + $3; printf "%d", (c > 0 ? c : 10000) }')"
+          VARIANT="${{ github.event.inputs.variant || 'release' }}"
+
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+
+          mkdir -p builds
+          OUT="builds/jcode-v${VERSION_NAME}-${CODE}-${VARIANT}.apk"
+
+          KEYSTORE="$HOME/.jcode/jcode-release.jks"
+          if [ -f "$KEYSTORE" ] && [ -n "${JCODE_KEYSTORE_PASSWORD:-}" ]; then
+            "$APKSIGNER" sign \
+              --ks "$KEYSTORE" \
+              --ks-pass "pass:$JCODE_KEYSTORE_PASSWORD" \
+              ${JCODE_KEY_ALIAS:+--ks-key-alias "$JCODE_KEY_ALIAS"} \
+              ${JCODE_KEY_PASSWORD:+--key-pass "pass:$JCODE_KEY_PASSWORD"} \
+              --out "$OUT" "$APK"
+            echo "Release-signed: $OUT"
+          elif [ -f "$HOME/.android/debug.keystore" ]; then
+            "$APKSIGNER" sign \
+              --ks "$HOME/.android/debug.keystore" \
+              --ks-pass pass:android \
+              --out "$OUT" "$APK"
+            echo "Debug-signed: $OUT"
+          else
+            cp "$APK" "$OUT"
+            echo "WARNING: UNSIGNED APK"
+          fi
+
+          ls -lh "$OUT"
+          echo "APK_PATH=$OUT" >> "$GITHUB_ENV"
+        env:
+          JCODE_KEYSTORE_PASSWORD: ${{ secrets.JCODE_KEYSTORE_PASSWORD }}
+          JCODE_KEY_ALIAS: ${{ secrets.JCODE_KEY_ALIAS }}
+          JCODE_KEY_PASSWORD: ${{ secrets.JCODE_KEY_PASSWORD }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jcode-release
+          path: builds/*.apk
+          if-no-files-found: error
