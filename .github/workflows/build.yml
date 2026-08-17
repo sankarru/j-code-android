@@ -106,24 +106,15 @@ jobs:
             python3 -m json.tool /tmp/graal-tracing/reflect-config.json 2>/dev/null | head -30 || true
           fi
 
-      - name: Build Rust FFI libs
-        run: |
-          ./gradlew \
-            :native:ripgrep-ffi:cargoBuildReleaseJniLibs \
-            :native:wasmtime-ffi:cargoBuildReleaseJniLibs \
-            --console=plain --no-daemon
-
-      - name: Build release APK
+      - name: Build release APK (cargo + assemble in one invocation)
         run: |
           VARIANT="${{ github.event.inputs.variant || 'release' }}"
           VERSION_NAME="$(sed -n 's/^val jcodeVersion = "\([^"]*\)".*/\1/p' app/build.gradle.kts)"
-          GRADLE_ARGS=(:app:assembleRelease "-PjcodeVersionName=$VERSION_NAME")
 
-          if [ "$VARIANT" = "beta" ]; then
-            GRADLE_ARGS+=("-PjcodeIdSuffix=.beta")
-          fi
-
-          ./gradlew "${GRADLE_ARGS[@]}" \
+          ./gradlew \
+            :native:ripgrep-ffi:cargoBuildReleaseJniLibs \
+            :native:wasmtime-ffi:cargoBuildReleaseJniLibs \
+            :app:assembleRelease "-PjcodeVersionName=$VERSION_NAME" \
             --console=plain --no-daemon \
             -Dkotlin.daemon.jvmargs=-Xmx2g
 
