@@ -82,7 +82,7 @@ jobs:
           mkdir -p /tmp/graal-tracing
 
           ./gradlew help \
-            -Dorg.gradle.jvmargs="-Xmx4g -agentlib:native-image-agent=config-output-dir=/tmp/graal-tracing,config-merge-dir=/tmp/graal-tracing" \
+            -Dorg.gradle.jvmargs="-Xmx4g -agentlib:native-image-agent=config-output-dir=/tmp/graal-tracing" \
             --console=plain --no-daemon || true
 
           echo "=== Tracing output ==="
