@@ -106,6 +106,15 @@ jobs:
             python3 -m json.tool /tmp/graal-tracing/reflect-config.json 2>/dev/null | head -30 || true
           fi
 
+      - name: Switch to Temurin JDK for AGP build
+        # GraalVM's jlink cannot transform android-36's core-for-system-modules.jar
+        # (JdkImageTransform failure in compileReleaseJavaWithJavac). Only the tracing
+        # pass needs GraalVM; the APK build runs on a stock JDK 21.
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
       - name: Build release APK (cargo + assemble in one invocation)
         run: |
           VARIANT="${{ github.event.inputs.variant || 'release' }}"
