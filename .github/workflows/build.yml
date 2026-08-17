@@ -74,6 +74,9 @@ jobs:
             echo "No keystore secret — will build unsigned"
           fi
 
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
       - name: GraalVM tracing pass (capture reflection/proxy/JNI metadata)
         run: |
           mkdir -p /tmp/graal-tracing
