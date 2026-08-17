@@ -97,6 +97,19 @@ subprojects {
     plugins.withId("com.android.library") {
         extensions.configure<LibraryExtension> {
             nativeModuleIds[path]?.let { nativeModuleId ->
+                // Rust FFI modules get their real .so from cargo (see gradle/cargo.gradle.kts);
+                // their CMake target is only a stub for cargo-less machines. When cargo is
+                // available, skip ALL CMake wiring for those modules: AGP auto-adds
+                // externalNativeBuild outputs to the native-lib merge, so a same-named stub
+                // would duplicate the cargo-built lib and fail mergeReleaseNativeLibs.
+                val cargoModule = path == ":native:ripgrep-ffi" || path == ":native:wasmtime-ffi"
+                val cargoAvailable = runCatching {
+                    ProcessBuilder("cargo", "--version")
+                        .redirectErrorStream(true)
+                        .start()
+                        .inputStream.use { it.readBytes().isNotEmpty() }
+                }.isSuccess
+                val useCmakeStub = !(cargoModule && cargoAvailable)
                 val jniOutputRoot = layout.buildDirectory.dir("generated/jniLibs").get().asFile.absolutePath.replace("\\", "/")
 
                 compileSdk = 36
@@ -104,19 +117,21 @@ subprojects {
                 defaultConfig {
                     minSdk = 33
 
-                    externalNativeBuild {
-                        cmake {
-                            arguments.addAll(
-                                listOf(
-                                    "-DANDROID_STL=c++_static",
-                                    "-DJCODE_NATIVE_MODULE=$nativeModuleId",
-                                    "-DJCODE_JNI_OUTPUT_DIR=$jniOutputRoot",
-                                    // CMake 4 removed compatibility with the < 3.5 minimums some
-                                    // FetchContent'd deps still declare (yaml-cpp); this raises
-                                    // their floor instead of failing configure. 3.x ignores it.
-                                    "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+                    if (useCmakeStub) {
+                        externalNativeBuild {
+                            cmake {
+                                arguments.addAll(
+                                    listOf(
+                                        "-DANDROID_STL=c++_static",
+                                        "-DJCODE_NATIVE_MODULE=$nativeModuleId",
+                                        "-DJCODE_JNI_OUTPUT_DIR=$jniOutputRoot",
+                                        // CMake 4 removed compatibility with the < 3.5 minimums some
+                                        // FetchContent'd deps still declare (yaml-cpp); this raises
+                                        // their floor instead of failing configure. 3.x ignores it.
+                                        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                 }
@@ -127,9 +142,11 @@ subprojects {
                             abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
                         }
 
-                        externalNativeBuild {
-                            cmake {
-                                arguments.add("-DJCODE_VARIANT_DIR=debug")
+                        if (useCmakeStub) {
+                            externalNativeBuild {
+                                cmake {
+                                    arguments.add("-DJCODE_VARIANT_DIR=debug")
+                                }
                             }
                         }
                     }
@@ -139,35 +156,26 @@ subprojects {
                             abiFilters.add("arm64-v8a")
                         }
 
-                        externalNativeBuild {
-                            cmake {
-                                arguments.add("-DJCODE_VARIANT_DIR=release")
+                        if (useCmakeStub) {
+                            externalNativeBuild {
+                                cmake {
+                                    arguments.add("-DJCODE_VARIANT_DIR=release")
+                                }
                             }
                         }
                     }
                 }
 
-                externalNativeBuild {
-                    cmake {
-                        path = rootProject.file("native/CMakeLists.txt")
-                        version = configuredCmakeVersion
+                if (useCmakeStub) {
+                    externalNativeBuild {
+                        cmake {
+                            path = rootProject.file("native/CMakeLists.txt")
+                            version = configuredCmakeVersion
+                        }
                     }
                 }
 
-                // Rust FFI modules also register generated/cargoJniLibs (see gradle/cargo.gradle.kts).
-                // Their CMake target is only a stub for cargo-less machines: when cargo is
-                // available it will produce real libs in cargoJniLibs during this same
-                // invocation, so the stub dir must NOT be registered — checking disk state
-                // here is too early in a combined cargo+assemble invocation and the jniLibs
-                // merger would see duplicate .so files.
-                val cargoModule = path == ":native:ripgrep-ffi" || path == ":native:wasmtime-ffi"
-                val cargoAvailable = runCatching {
-                    ProcessBuilder("cargo", "--version")
-                        .redirectErrorStream(true)
-                        .start()
-                        .inputStream.use { it.readBytes().isNotEmpty() }
-                }.isSuccess
-                if (!(cargoModule && cargoAvailable)) {
+                if (useCmakeStub) {
                     listOf("debug", "release").forEach { variant ->
                         sourceSets.getByName(variant).jniLibs.srcDir(layout.buildDirectory.dir("generated/jniLibs/$variant"))
                     }
